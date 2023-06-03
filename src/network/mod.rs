@@ -1,16 +1,19 @@
 use std::{cell::RefCell, io, rc::Rc, time::Duration, time::Instant};
 
 use futures::future::{ready, select, Either};
-use ntex::service::{fn_factory_with_config, fn_shutdown, Service};
-use ntex::util::Bytes;
+use ntex::service::{fn_factory_with_config, fn_shutdown, map_config, Service};
+use ntex::util::{Bytes, ByteString};
 use ntex::web;
 use ntex::web::ws;
 use ntex::{channel::oneshot, rt, time};
 use ntex::{fn_service, pipeline};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+
+use crate::event::{Event, RawPacket};
+use crate::rooms::Room;
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
-
 
 #[derive(Serialize, Deserialize)]
 struct Packet {
@@ -20,25 +23,70 @@ struct Packet {
 
 struct WsSession {
     hb: Instant,
+    room: Rc<Room>,
+}
+
+#[derive(Deserialize)]
+struct WsRequestQuery {
+    token: Option<String>,
 }
 
 #[web::get("/")]
-async fn ws_index(req: web::HttpRequest) -> Result<web::HttpResponse, web::Error> {
-    ws::start(req, fn_factory_with_config(ws_service)).await
+async fn ws_index(
+    web::types::Query(qs): web::types::Query<WsRequestQuery>,
+    req: web::HttpRequest,
+    starting_room: web::types::State<Rc<Room>>,
+) -> Result<web::HttpResponse, web::Error> {
+    let token = qs.token;
+    ws::start(
+        req,
+        map_config(fn_factory_with_config(ws_service), move |cfg| {
+            (cfg, starting_room.get_ref().clone(), token.clone())
+        }),
+    )
+    .await
+}
+
+async fn is_valid_token(token: &str) -> bool {
+   true 
+}
+
+async fn generate_token() -> String {
+    let token = uuid::Uuid::new_v4().to_string();
+    // TODO: validate token
+    token
 }
 
 /// WebSockets service factory
 async fn ws_service(
-    sink: ws::WsSink,
+    (sink, room, token): (ws::WsSink, Rc<Room>, Option<String>),
 ) -> Result<impl Service<ws::Frame, Response = Option<ws::Message>, Error = io::Error>, web::Error>
 {
-    let state = Rc::new(RefCell::new(WsSession { hb: Instant::now() }));
+    let state = Rc::new(RefCell::new(WsSession {
+        hb: Instant::now(),
+        room,
+    }));
 
     // disconnect notification
     let (tx, rx) = oneshot::channel();
 
     // start heartbeat task
-    rt::spawn(heartbeat(state.clone(), sink, rx));
+    rt::spawn(heartbeat(state.clone(), sink.clone(), rx));
+
+    // authentication
+    let token = match token {
+        Some(token) if is_valid_token(&token).await => token,
+        _ => {
+            generate_token().await
+        }
+    };
+
+    println!("Got client token: {}", token);
+    
+    let auth_packet = Event::SetAuthToken{token};
+    sink.send(ws::Message::Text(ByteString::from(auth_packet.stringfy().unwrap()))).await;
+
+    state.borrow().room.on(Event::Connect);
 
     // handler service for incoming websockets frames
     let service = fn_service(move |frame| {
@@ -53,7 +101,14 @@ async fn ws_service(
             }
             ws::Frame::Text(raw) => {
                 let m = String::from_utf8(Vec::from(&raw[..])).unwrap();
-                let packet: Packet = serde_json::from_str(&m).unwrap();
+                let packet: RawPacket = serde_json::from_str(&m).unwrap();
+                let event = Event::parse(packet);
+
+                match event {
+                    Ok(event) => state.borrow().room.on(event),
+                    Err(err) => println!("{}", err),
+                }
+
                 None
             }
             ws::Frame::Close(reason) => Some(ws::Message::Close(reason)),
