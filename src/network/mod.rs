@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, io, rc::Rc, time::Duration, time::Instant};
 
 use futures::future::{ready, select, Either};
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, RawPacket};
 use crate::rooms::Room;
+use crate::server::GameServer;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -23,7 +25,6 @@ struct Packet {
 
 struct WsSession {
     hb: Instant,
-    room: Rc<Room>,
 }
 
 #[derive(Deserialize)]
@@ -35,13 +36,13 @@ struct WsRequestQuery {
 async fn ws_index(
     web::types::Query(qs): web::types::Query<WsRequestQuery>,
     req: web::HttpRequest,
-    starting_room: web::types::State<Rc<Room>>,
+    server: web::types::State<Arc<Mutex<GameServer>>>,
 ) -> Result<web::HttpResponse, web::Error> {
     let token = qs.token;
     ws::start(
         req,
         map_config(fn_factory_with_config(ws_service), move |cfg| {
-            (cfg, starting_room.get_ref().clone(), token.clone())
+            (cfg, server.get_ref().clone(), token.clone())
         }),
     )
     .await
@@ -59,12 +60,11 @@ async fn generate_token() -> String {
 
 /// WebSockets service factory
 async fn ws_service(
-    (sink, room, token): (ws::WsSink, Rc<Room>, Option<String>),
+    (sink, server, token): (ws::WsSink, Arc<Mutex<GameServer>>, Option<String>),
 ) -> Result<impl Service<ws::Frame, Response = Option<ws::Message>, Error = io::Error>, web::Error>
 {
     let state = Rc::new(RefCell::new(WsSession {
         hb: Instant::now(),
-        room,
     }));
 
     // disconnect notification
@@ -82,11 +82,13 @@ async fn ws_service(
     };
 
     println!("Got client token: {}", token);
+    let user_id = server.lock().unwrap().get_or_create_user(token.clone());
+    println!("Got user id: {}", user_id);
     
     let auth_packet = Event::SetAuthToken{token};
     sink.send(ws::Message::Text(ByteString::from(auth_packet.stringfy().unwrap()))).await;
 
-    state.borrow().room.on(Event::Connect);
+    // state.borrow().room.on(Event::Connect);
 
     // handler service for incoming websockets frames
     let service = fn_service(move |frame| {
@@ -105,7 +107,7 @@ async fn ws_service(
                 let event = Event::parse(packet);
 
                 match event {
-                    Ok(event) => state.borrow().room.on(event),
+                    Ok(event) => {}, // state.borrow().room.on(event),
                     Err(err) => println!("{}", err),
                 }
 
