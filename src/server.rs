@@ -1,31 +1,51 @@
-use std::{collections::HashMap, sync::Arc};
-use futures::{channel::mpsc::{self, UnboundedSender}, StreamExt};
+use crate::{
+    event::{client_message::ClientMessage, server_message::ServerMessage},
+    rooms::Room,
+};
+use futures::{
+    channel::mpsc::{self, UnboundedSender},
+    StreamExt, SinkExt,
+};
 use ntex::rt;
-use crate::{rooms::Room, event::server_message::ServerMessage};
+use std::{collections::HashMap, rc::Rc};
 
 pub struct User {
-    pub room: Arc<Room>,
+    room: Rc<Room>,
+    client: Option<UnboundedSender<ClientMessage>>,
 }
 
 pub struct UserManager {
-    starting_room: Arc<Room>,
     id_counter: usize,
-
     sessions: HashMap<usize, User>,
     token_store: HashMap<String, usize>,
 }
 
 impl<'a> UserManager {
-    fn new(starting_room: Arc<Room>) -> Self {
+    fn new() -> Self {
         UserManager {
             id_counter: 0,
-            starting_room,
             sessions: HashMap::new(),
             token_store: HashMap::new(),
         }
     }
 
-    pub fn get_or_create(&mut self, token: String) -> usize {
+    fn generate_token(&self) -> String {
+        loop {
+            let token = uuid::Uuid::new_v4().to_string();
+            if !self.token_exists(&token) {
+                return token;
+            }
+        }
+    }
+
+    pub fn get_valid_token(&self, token: Option<String>) -> String {
+        match token {
+            Some(token) if self.token_exists(&token) => token,
+            _ => self.generate_token(),
+        }
+    }
+
+    pub fn session(&mut self, token: String, starting_room: Rc<Room>) -> usize {
         match self.token_store.get(&token) {
             Some(id) => id.to_owned(),
             None => {
@@ -35,7 +55,8 @@ impl<'a> UserManager {
                 self.sessions.insert(
                     id,
                     User {
-                        room: self.starting_room.clone(),
+                        room: starting_room.clone(),
+                        client: None,
                     },
                 );
                 id
@@ -53,13 +74,31 @@ impl<'a> UserManager {
 }
 
 pub struct GameServer {
-    pub user: UserManager,
+    user: UserManager,
+    starting_room: Rc<Room>,
 }
 
 impl GameServer {
     fn new() -> Self {
         GameServer {
-            user: UserManager::new(Arc::new(Room::WaitingRoom)),
+            user: UserManager::new(),
+            starting_room: Rc::new(Room::WaitingRoom),
+        }
+    }
+
+    fn handle(&mut self, msg: ServerMessage) {
+        match msg {
+            ServerMessage::Connect(client, token) => {
+                let token = self.user.get_valid_token(token);
+                let user_id = self.user.session(token.clone(), self.starting_room.clone());
+                let mut client = client.clone();
+                rt::spawn(async move {
+                    let _ = client.send(ClientMessage::Id(user_id, token)).await;
+                });
+            }
+            ServerMessage::Disconnect(client_id) => {
+                println!("User {} disconnected", client_id);
+            },
         }
     }
 
@@ -71,7 +110,7 @@ impl GameServer {
                 let mut srv = GameServer::new();
 
                 while let Some(msg) = rx.next().await {
-                    // Handle message
+                    srv.handle(msg);
                 }
 
                 rt::Arbiter::current().stop();

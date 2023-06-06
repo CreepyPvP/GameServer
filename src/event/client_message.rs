@@ -1,3 +1,3 @@
 pub enum ClientMessage {
-    Id(usize, String)
+    Id(usize, String),
 }

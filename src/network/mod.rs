@@ -1,10 +1,10 @@
 use std::{cell::RefCell, io, rc::Rc, time::Duration, time::Instant};
 
-use futures::{StreamExt, SinkExt};
-use futures::channel::mpsc::{UnboundedSender, self};
+use futures::channel::mpsc::{self, UnboundedSender};
 use futures::future::{ready, select, Either};
+use futures::{SinkExt, StreamExt};
 use ntex::service::{fn_factory_with_config, fn_shutdown, map_config, Service};
-use ntex::util::{Bytes, self};
+use ntex::util::{self, Bytes};
 use ntex::web;
 use ntex::web::ws;
 use ntex::{channel::oneshot, rt, time};
@@ -54,39 +54,20 @@ async fn is_valid_token(token: &str, user_mgr: &UserManager) -> bool {
     user_mgr.token_exists(token)
 }
 
-async fn generate_token(user_mgr: &UserManager) -> String {
-    loop {
-        let token = uuid::Uuid::new_v4().to_string();
-        if !user_mgr.token_exists(&token) {
-            return token;
-        }
-    }
-}
-
 async fn ws_service(
     (sink, mut srv, token): (ws::WsSink, UnboundedSender<ServerMessage>, Option<String>),
 ) -> Result<impl Service<ws::Frame, Response = Option<ws::Message>, Error = io::Error>, web::Error>
 {
     let (tx, mut rx) = mpsc::unbounded();
 
-    // // authentication
-    // let token = {
-    //     let user_mgr = &server.lock().unwrap().user;
-    //     match token {
-    //         Some(token) if is_valid_token(&token, user_mgr).await => token,
-    //         _ => generate_token(user_mgr).await,
-    //     }
-    // };
-
-    // let user_id = server.lock().unwrap().user.get_or_create(token.clone());
-
-    srv.send(ServerMessage::Connect(tx, None)).await.unwrap();
+    srv.send(ServerMessage::Connect(tx, token)).await.unwrap();
 
     let (id, token) = if let Some(ClientMessage::Id(id, token)) = rx.next().await {
         (id, token)
     } else {
         panic!();
     };
+    println!("Got token {}, and id {}", token, id);
 
     let state = Rc::new(RefCell::new(WsSession {
         hb: Instant::now(),
@@ -104,7 +85,6 @@ async fn ws_service(
 
     let (tx, rx) = oneshot::channel();
     rt::spawn(heartbeat(state.clone(), sink.clone(), srv.clone(), rx));
-
 
     // handler service for incoming websockets frames
     let service = fn_service(move |frame| {
