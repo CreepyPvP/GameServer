@@ -1,18 +1,16 @@
-use std::sync::{Arc, Mutex};
-
 use ntex::web;
 
 use crate::server::GameServer;
 
 mod error;
 mod event;
-mod server;
 mod network;
 mod rooms;
+mod server;
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
-    let server = Arc::new(Mutex::new(GameServer::new()));
+    let srv = GameServer::start();
 
     let port = 3000;
     println!("Server listening on port: {}", port);
@@ -20,7 +18,7 @@ async fn main() -> std::io::Result<()> {
     web::server(move || {
         web::App::new()
             .wrap(web::middleware::Logger::default())
-            .state(server.clone())
+            .state(srv.clone())
             .service(network::ws_index)
     })
     .bind(format!("127.0.0.1:{}", port))?

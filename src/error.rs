@@ -12,11 +12,10 @@ impl std::fmt::Display for GameError {
     }
 }
 
-
 impl From<serde_json::error::Error> for GameError {
     fn from(value: serde_json::error::Error) -> Self {
-        GameError { 
-            context: "JsonError".to_string(), 
+        GameError {
+            context: "JsonError".to_string(),
             msg: value.to_string(),
         }
     }
@@ -25,8 +24,8 @@ impl From<serde_json::error::Error> for GameError {
 impl From<web::Error> for GameError {
     fn from(value: web::Error) -> Self {
         GameError {
-           context: "WebError".to_string(),
-           msg: value.to_string(),
+            context: "WebError".to_string(),
+            msg: value.to_string(),
         }
     }
 }

@@ -1,18 +1,19 @@
-use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, io, rc::Rc, time::Duration, time::Instant};
 
+use futures::{StreamExt, SinkExt};
+use futures::channel::mpsc::{UnboundedSender, self};
 use futures::future::{ready, select, Either};
 use ntex::service::{fn_factory_with_config, fn_shutdown, map_config, Service};
-use ntex::util::{Bytes, ByteString};
+use ntex::util::{Bytes, self};
 use ntex::web;
 use ntex::web::ws;
 use ntex::{channel::oneshot, rt, time};
 use ntex::{fn_service, pipeline};
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Event, RawPacket};
-use crate::rooms::Room;
-use crate::server::GameServer;
+use crate::event::client_message::ClientMessage;
+use crate::event::server_message::ServerMessage;
+use crate::server::UserManager;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,6 +25,7 @@ struct Packet {
 }
 
 struct WsSession {
+    id: usize,
     hb: Instant,
 }
 
@@ -36,7 +38,7 @@ struct WsRequestQuery {
 async fn ws_index(
     web::types::Query(qs): web::types::Query<WsRequestQuery>,
     req: web::HttpRequest,
-    server: web::types::State<Arc<Mutex<GameServer>>>,
+    server: web::types::State<UnboundedSender<ServerMessage>>,
 ) -> Result<web::HttpResponse, web::Error> {
     let token = qs.token;
     ws::start(
@@ -48,47 +50,61 @@ async fn ws_index(
     .await
 }
 
-async fn is_valid_token(token: &str) -> bool {
-   true 
+async fn is_valid_token(token: &str, user_mgr: &UserManager) -> bool {
+    user_mgr.token_exists(token)
 }
 
-async fn generate_token() -> String {
-    let token = uuid::Uuid::new_v4().to_string();
-    // TODO: validate token
-    token
+async fn generate_token(user_mgr: &UserManager) -> String {
+    loop {
+        let token = uuid::Uuid::new_v4().to_string();
+        if !user_mgr.token_exists(&token) {
+            return token;
+        }
+    }
 }
 
-/// WebSockets service factory
 async fn ws_service(
-    (sink, server, token): (ws::WsSink, Arc<Mutex<GameServer>>, Option<String>),
+    (sink, mut srv, token): (ws::WsSink, UnboundedSender<ServerMessage>, Option<String>),
 ) -> Result<impl Service<ws::Frame, Response = Option<ws::Message>, Error = io::Error>, web::Error>
 {
-    let state = Rc::new(RefCell::new(WsSession {
-        hb: Instant::now(),
-    }));
+    let (tx, mut rx) = mpsc::unbounded();
 
-    // disconnect notification
-    let (tx, rx) = oneshot::channel();
+    // // authentication
+    // let token = {
+    //     let user_mgr = &server.lock().unwrap().user;
+    //     match token {
+    //         Some(token) if is_valid_token(&token, user_mgr).await => token,
+    //         _ => generate_token(user_mgr).await,
+    //     }
+    // };
 
-    // start heartbeat task
-    rt::spawn(heartbeat(state.clone(), sink.clone(), rx));
+    // let user_id = server.lock().unwrap().user.get_or_create(token.clone());
 
-    // authentication
-    let token = match token {
-        Some(token) if is_valid_token(&token).await => token,
-        _ => {
-            generate_token().await
-        }
+    srv.send(ServerMessage::Connect(tx, None)).await.unwrap();
+
+    let (id, token) = if let Some(ClientMessage::Id(id, token)) = rx.next().await {
+        (id, token)
+    } else {
+        panic!();
     };
 
-    println!("Got client token: {}", token);
-    let user_id = server.lock().unwrap().get_or_create_user(token.clone());
-    println!("Got user id: {}", user_id);
-    
-    let auth_packet = Event::SetAuthToken{token};
-    sink.send(ws::Message::Text(ByteString::from(auth_packet.stringfy().unwrap()))).await;
+    let state = Rc::new(RefCell::new(WsSession {
+        hb: Instant::now(),
+        id,
+    }));
 
-    // state.borrow().room.on(Event::Connect);
+    // let auth_packet = Event::SetAuthToken { token };
+    // let _ = sink
+    //     .send(ws::Message::Text(ByteString::from(
+    //         auth_packet.stringfy().unwrap(),
+    //     )))
+    //     .await;
+
+    rt::spawn(messages(sink.clone(), rx));
+
+    let (tx, rx) = oneshot::channel();
+    rt::spawn(heartbeat(state.clone(), sink.clone(), srv.clone(), rx));
+
 
     // handler service for incoming websockets frames
     let service = fn_service(move |frame| {
@@ -103,13 +119,7 @@ async fn ws_service(
             }
             ws::Frame::Text(raw) => {
                 let m = String::from_utf8(Vec::from(&raw[..])).unwrap();
-                let packet: RawPacket = serde_json::from_str(&m).unwrap();
-                let event = Event::parse(packet);
-
-                match event {
-                    Ok(event) => {}, // state.borrow().room.on(event),
-                    Err(err) => println!("{}", err),
-                }
+                let packet: Packet = serde_json::from_str(&m).unwrap();
 
                 None
             }
@@ -128,28 +138,36 @@ async fn ws_service(
     Ok(pipeline(service).and_then(on_shutdown))
 }
 
-/// helper method that sends ping to client every heartbeat interval
-async fn heartbeat(state: Rc<RefCell<WsSession>>, sink: ws::WsSink, mut rx: oneshot::Receiver<()>) {
-    loop {
-        match select(Box::pin(time::sleep(HEARTBEAT_INTERVAL)), &mut rx).await {
-            Either::Left(_) => {
-                // check client heartbeats
-                if Instant::now().duration_since(state.borrow().hb) > CLIENT_TIMEOUT {
-                    // heartbeat timed out
-                    println!("Websocket Client heartbeat failed, disconnecting!");
-                    return;
-                }
+async fn messages(sink: ws::WsSink, mut server: mpsc::UnboundedReceiver<ClientMessage>) {
+    while let Some(msg) = server.next().await {
+        match msg {
+            ClientMessage::Id(_, _) => (),
+        }
+    }
+}
 
-                // send ping
-                if sink
-                    .send(ws::Message::Ping(Bytes::default()))
-                    .await
-                    .is_err()
-                {
+async fn heartbeat(
+    state: Rc<RefCell<WsSession>>,
+    sink: ws::WsSink,
+    mut server: mpsc::UnboundedSender<ServerMessage>,
+    mut rx: oneshot::Receiver<()>,
+) {
+    loop {
+        match util::select(Box::pin(time::sleep(HEARTBEAT_INTERVAL)), &mut rx).await {
+            util::Either::Left(_) => {
+                if Instant::now().duration_since(state.borrow().hb) > CLIENT_TIMEOUT {
+                    println!("Websocket Client heartbeat failed, disconnecting!");
+                    let _ = server.send(ServerMessage::Disconnect(state.borrow().id));
+                    sink.io().close();
                     return;
+                } else {
+                    // send ping
+                    if sink.send(ws::Message::Ping(Bytes::new())).await.is_err() {
+                        return;
+                    }
                 }
             }
-            Either::Right(_) => {
+            util::Either::Right(_) => {
                 println!("Connection is dropped, stop heartbeat task");
                 return;
             }
