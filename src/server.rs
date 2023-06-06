@@ -1,17 +1,16 @@
-use crate::{
-    event::{client_message::ClientMessage, server_message::ServerMessage},
-    rooms::Room,
-};
+use crate::{rooms::Room, event::server_message::ServerEvent};
+use crate::event::client_message::ClientEvent;
+use futures::SinkExt;
 use futures::{
     channel::mpsc::{self, UnboundedSender},
-    StreamExt, SinkExt,
+    StreamExt,
 };
 use ntex::rt;
 use std::{collections::HashMap, rc::Rc};
 
 pub struct User {
     room: Rc<Room>,
-    client: Option<UnboundedSender<ClientMessage>>,
+    client: Option<UnboundedSender<ClientEvent>>,
 }
 
 pub struct UserManager {
@@ -86,23 +85,26 @@ impl GameServer {
         }
     }
 
-    fn handle(&mut self, msg: ServerMessage) {
+    fn handle(&mut self, msg: ServerEvent) {
         match msg {
-            ServerMessage::Connect(client, token) => {
+            ServerEvent::Connect(client, token) => {
                 let token = self.user.get_valid_token(token);
                 let user_id = self.user.session(token.clone(), self.starting_room.clone());
                 let mut client = client.clone();
                 rt::spawn(async move {
-                    let _ = client.send(ClientMessage::Id(user_id, token)).await;
+                    let _ = client.send(ClientEvent::Id(user_id, token)).await;
                 });
             }
-            ServerMessage::Disconnect(client_id) => {
+            ServerEvent::Disconnect(client_id) => {
                 println!("User {} disconnected", client_id);
             },
+            ServerEvent::Message(packet, client_id) => {
+
+            }
         }
     }
 
-    pub fn start() -> UnboundedSender<ServerMessage> {
+    pub fn start() -> UnboundedSender<ServerEvent> {
         let (tx, mut rx) = mpsc::unbounded();
 
         rt::Arbiter::new().exec_fn(move || {

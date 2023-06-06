@@ -4,15 +4,15 @@ use futures::channel::mpsc::{self, UnboundedSender};
 use futures::future::{ready, select, Either};
 use futures::{SinkExt, StreamExt};
 use ntex::service::{fn_factory_with_config, fn_shutdown, map_config, Service};
-use ntex::util::{self, Bytes};
+use ntex::util::{self, Bytes, ByteString};
 use ntex::web;
 use ntex::web::ws;
 use ntex::{channel::oneshot, rt, time};
 use ntex::{fn_service, pipeline};
 use serde::{Deserialize, Serialize};
 
-use crate::event::client_message::ClientMessage;
-use crate::event::server_message::ServerMessage;
+use crate::event::client_message::ClientEvent;
+use crate::event::server_message::{ServerEvent, ServerMessage};
 use crate::server::UserManager;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -38,7 +38,7 @@ struct WsRequestQuery {
 async fn ws_index(
     web::types::Query(qs): web::types::Query<WsRequestQuery>,
     req: web::HttpRequest,
-    server: web::types::State<UnboundedSender<ServerMessage>>,
+    server: web::types::State<UnboundedSender<ServerEvent>>,
 ) -> Result<web::HttpResponse, web::Error> {
     let token = qs.token;
     ws::start(
@@ -55,14 +55,14 @@ async fn is_valid_token(token: &str, user_mgr: &UserManager) -> bool {
 }
 
 async fn ws_service(
-    (sink, mut srv, token): (ws::WsSink, UnboundedSender<ServerMessage>, Option<String>),
+    (sink, mut srv, token): (ws::WsSink, UnboundedSender<ServerEvent>, Option<String>),
 ) -> Result<impl Service<ws::Frame, Response = Option<ws::Message>, Error = io::Error>, web::Error>
 {
     let (tx, mut rx) = mpsc::unbounded();
 
-    srv.send(ServerMessage::Connect(tx, token)).await.unwrap();
+    srv.send(ServerEvent::Connect(tx, token)).await.unwrap();
 
-    let (id, token) = if let Some(ClientMessage::Id(id, token)) = rx.next().await {
+    let (id, token) = if let Some(ClientEvent::Id(id, token)) = rx.next().await {
         (id, token)
     } else {
         panic!();
@@ -98,8 +98,10 @@ async fn ws_service(
                 None
             }
             ws::Frame::Text(raw) => {
-                let m = String::from_utf8(Vec::from(&raw[..])).unwrap();
-                let packet: Packet = serde_json::from_str(&m).unwrap();
+                let msg = String::from_utf8(Vec::from(&raw[..])).unwrap();
+                if let Some(packet) = ServerMessage::parse(msg) {
+                    
+                }
 
                 None
             }
@@ -118,18 +120,24 @@ async fn ws_service(
     Ok(pipeline(service).and_then(on_shutdown))
 }
 
-async fn messages(sink: ws::WsSink, mut server: mpsc::UnboundedReceiver<ClientMessage>) {
+async fn messages(sink: ws::WsSink, mut server: mpsc::UnboundedReceiver<ClientEvent>) {
     while let Some(msg) = server.next().await {
         match msg {
-            ClientMessage::Id(_, _) => (),
-        }
+            ClientEvent::Id(_, _) => (),
+            ClientEvent::Message(packet) => {
+                let raw = packet.stringfy();
+                if let Ok(raw) = raw {
+                    let _ = sink.send(ws::Message::Text(ByteString::from(raw))).await;
+                }
+            }
+        };
     }
 }
 
 async fn heartbeat(
     state: Rc<RefCell<WsSession>>,
     sink: ws::WsSink,
-    mut server: mpsc::UnboundedSender<ServerMessage>,
+    mut server: mpsc::UnboundedSender<ServerEvent>,
     mut rx: oneshot::Receiver<()>,
 ) {
     loop {
@@ -137,7 +145,7 @@ async fn heartbeat(
             util::Either::Left(_) => {
                 if Instant::now().duration_since(state.borrow().hb) > CLIENT_TIMEOUT {
                     println!("Websocket Client heartbeat failed, disconnecting!");
-                    let _ = server.send(ServerMessage::Disconnect(state.borrow().id));
+                    let _ = server.send(ServerEvent::Disconnect(state.borrow().id));
                     sink.io().close();
                     return;
                 } else {
