@@ -1,4 +1,5 @@
 use ntex::web;
+use redis::RedisError;
 
 #[derive(Debug)]
 pub struct GameError {
@@ -25,6 +26,24 @@ impl From<web::Error> for GameError {
     fn from(value: web::Error) -> Self {
         GameError {
             context: "WebError".to_string(),
+            msg: value.to_string(),
+        }
+    }
+}
+
+impl From<std::io::Error> for GameError {
+    fn from(value: std::io::Error) -> Self {
+        GameError {
+            context: "IoError".to_string(),
+            msg: value.to_string(),
+        }
+    }
+}
+
+impl From<RedisError> for GameError {
+    fn from(value: RedisError) -> Self {
+        GameError {
+            context: "RedisError".to_string(),
             msg: value.to_string(),
         }
     }
