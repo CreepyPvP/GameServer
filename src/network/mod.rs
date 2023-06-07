@@ -62,24 +62,16 @@ async fn ws_service(
 
     srv.send(ServerEvent::Connect(tx, token)).await.unwrap();
 
-    let (id, token) = if let Some(ClientEvent::Id(id, token)) = rx.next().await {
-        (id, token)
+    let id = if let Some(ClientEvent::Id(id)) = rx.next().await {
+        id
     } else {
         panic!();
     };
-    println!("Got token {}, and id {}", token, id);
 
     let state = Rc::new(RefCell::new(WsSession {
         hb: Instant::now(),
         id,
     }));
-
-    // let auth_packet = Event::SetAuthToken { token };
-    // let _ = sink
-    //     .send(ws::Message::Text(ByteString::from(
-    //         auth_packet.stringfy().unwrap(),
-    //     )))
-    //     .await;
 
     rt::spawn(messages(sink.clone(), rx));
 
@@ -123,7 +115,7 @@ async fn ws_service(
 async fn messages(sink: ws::WsSink, mut server: mpsc::UnboundedReceiver<ClientEvent>) {
     while let Some(msg) = server.next().await {
         match msg {
-            ClientEvent::Id(_, _) => (),
+            ClientEvent::Id(_) => (),
             ClientEvent::Message(packet) => {
                 let raw = packet.stringfy();
                 if let Ok(raw) = raw {

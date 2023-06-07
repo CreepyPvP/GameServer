@@ -1,5 +1,5 @@
 use crate::{rooms::Room, event::server_message::ServerEvent};
-use crate::event::client_message::ClientEvent;
+use crate::event::client_message::{ClientEvent, ClientMessage, AuthData};
 use futures::SinkExt;
 use futures::{
     channel::mpsc::{self, UnboundedSender},
@@ -91,8 +91,12 @@ impl GameServer {
                 let token = self.user.get_valid_token(token);
                 let user_id = self.user.session(token.clone(), self.starting_room.clone());
                 let mut client = client.clone();
+                println!("New client, got id {}, and token {}", user_id, token);
                 rt::spawn(async move {
-                    let _ = client.send(ClientEvent::Id(user_id, token)).await;
+                    let _ = client.send(ClientEvent::Id(user_id)).await;
+
+                    let auth_packet = ClientMessage::Auth(AuthData{token});
+                    let _ = client.send(ClientEvent::Message(auth_packet)).await;
                 });
             }
             ServerEvent::Disconnect(client_id) => {

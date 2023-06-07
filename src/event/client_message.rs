@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize};
 use super::RawPacket;
 
 pub enum ClientEvent {
-    Id(usize, String),
+    Id(usize),
     Message(ClientMessage)
 }
 
@@ -11,18 +11,18 @@ pub enum ClientEvent {
 // outgoing
 
 #[derive(Serialize, Deserialize)]
-struct TestMessageData {
-    msg: String,
+pub struct AuthData {
+    pub token: String,
 }
 
 pub enum ClientMessage {
-    Test(TestMessageData)
+    Auth(AuthData),
 }
 
 impl ClientMessage {
     pub fn stringfy(self) -> Result<String, serde_json::Error> {
         let (channel, data) = match self {
-            Self::Test(data) => ("test", serde_json::to_value(data)?),
+            Self::Auth(data) => ("set_auth_token", serde_json::to_value(data)?),
         };
         let raw = RawPacket {
             channel: channel.to_string(), data
