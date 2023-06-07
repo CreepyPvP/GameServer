@@ -1,0 +1,29 @@
+version: '3.9'
+
+networks:
+  system:
+    name: system
+
+services:
+  redis:
+    container_name: redis
+    image: redis
+    networks:
+      - system
+  game-server1:
+    container_name: game-server1
+    image: gameserver/dev
+    tty: true
+    networks:
+      - system
+    ports:
+      - 3000:3000
+    volumes:
+      - ./:/project
+    command:
+      - cargo
+      - watch
+      - -w
+      - /project/src
+      - -x
+      - run

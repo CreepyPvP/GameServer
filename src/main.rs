@@ -11,7 +11,6 @@ mod server;
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
     let srv = GameServer::start();
-
     let port = 3000;
     println!("Server listening on port: {}", port);
 
