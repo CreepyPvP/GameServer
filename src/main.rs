@@ -16,18 +16,19 @@ mod server;
 #[ntex::main]
 async fn main() -> Result<(), AppError> {
     let srv = GameServer::start();
+    let message_worker = CommandWorker::create().await.expect("Failed to create command worker");
+    
     let port = 3000;
     println!("Server listening on port: {}", port);
 
     web::server(move || {
-        let message_worker = CommandWorker::create();
 
         web::App::new()
             .wrap(web::middleware::Logger::default())
-            .state((srv.clone(), message_worker))
+            .state((srv.clone(), message_worker.clone()))
             .service(network::ws_index)
     })
-    .bind(format!("127.0.0.1:{}", port))?
+    .bind(format!("0.0.0.0:{}", port))?
     .run()
     .await?;
 
