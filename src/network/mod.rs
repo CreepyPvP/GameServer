@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::event::client_message::ClientEvent;
 use crate::event::server_message::{ServerEvent, ServerMessage};
-use crate::message_worker::CmdWorkerMsg;
+use crate::command_worker::CmdWorkerMsg;
 use crate::server::UserManager;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
