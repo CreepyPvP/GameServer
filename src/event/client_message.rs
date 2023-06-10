@@ -1,12 +1,12 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use super::RawPacket;
 
 pub enum ClientEvent {
     Id(usize),
-    Message(ClientMessage)
+    Message(ClientMessage),
+    RawMessage(String),
 }
-
 
 // outgoing
 
@@ -25,9 +25,10 @@ impl ClientMessage {
             Self::Auth(data) => ("set_auth_token", serde_json::to_value(data)?),
         };
         let raw = RawPacket {
-            channel: channel.to_string(), data
+            channel: channel.to_string(),
+            data,
         };
 
-        serde_json::to_string(&raw) 
-    } 
+        serde_json::to_string(&raw)
+    }
 }

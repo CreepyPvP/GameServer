@@ -10,6 +10,8 @@ services:
     image: redis
     networks:
       - system
+    ports:
+      - 6379:6379
   game-server1:
     container_name: game-server1
     image: gameserver/dev

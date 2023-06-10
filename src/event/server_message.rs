@@ -1,5 +1,5 @@
 use futures::channel::mpsc::UnboundedSender;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use super::{client_message::ClientEvent, RawPacket};
 
@@ -8,8 +8,6 @@ pub enum ServerEvent {
     Disconnect(usize),
     Message(ServerMessage, usize),
 }
-
-
 
 // inbound
 
@@ -32,7 +30,9 @@ impl ServerMessage {
     pub fn parse(msg: String) -> Option<Self> {
         let raw: RawPacket = match serde_json::from_str(&msg) {
             Ok(raw) => raw,
-            Err(_) => { return None; }
+            Err(_) => {
+                return None;
+            }
         };
 
         let parse = || -> Result<Option<ServerMessage>, serde_json::Error> {

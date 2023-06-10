@@ -1,18 +1,20 @@
 use std::{cell::RefCell, io, rc::Rc, time::Duration, time::Instant};
 
 use futures::channel::mpsc::{self, UnboundedSender};
-use futures::future::{ready, select, Either};
+use futures::future::ready;
 use futures::{SinkExt, StreamExt};
 use ntex::service::{fn_factory_with_config, fn_shutdown, map_config, Service};
-use ntex::util::{self, Bytes, ByteString};
+use ntex::util::{self, ByteString, Bytes};
 use ntex::web;
 use ntex::web::ws;
 use ntex::{channel::oneshot, rt, time};
 use ntex::{fn_service, pipeline};
 use serde::{Deserialize, Serialize};
 
+use crate::error::AppError;
 use crate::event::client_message::ClientEvent;
 use crate::event::server_message::{ServerEvent, ServerMessage};
+use crate::message_worker::CmdWorkerMsg;
 use crate::server::UserManager;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -27,7 +29,17 @@ struct Packet {
 struct WsSession {
     id: usize,
     hb: Instant,
+
+    server: UnboundedSender<ServerEvent>,
+    command_worker: UnboundedSender<CmdWorkerMsg>
 }
+
+impl Drop for WsSession {
+    fn drop(&mut self) {
+        let _ = self.command_worker.send(CmdWorkerMsg::Remove(self.id));
+    }
+}
+
 
 #[derive(Deserialize)]
 struct WsRequestQuery {
@@ -38,13 +50,18 @@ struct WsRequestQuery {
 async fn ws_index(
     web::types::Query(qs): web::types::Query<WsRequestQuery>,
     req: web::HttpRequest,
-    server: web::types::State<UnboundedSender<ServerEvent>>,
+    state: web::types::State<(UnboundedSender<ServerEvent>, UnboundedSender<CmdWorkerMsg>)>,
 ) -> Result<web::HttpResponse, web::Error> {
     let token = qs.token;
     ws::start(
         req,
         map_config(fn_factory_with_config(ws_service), move |cfg| {
-            (cfg, server.get_ref().clone(), token.clone())
+            (
+                cfg,
+                state.get_ref().0.clone(),
+                state.get_ref().1.clone(),
+                token.clone(),
+            )
         }),
     )
     .await
@@ -55,12 +72,16 @@ async fn is_valid_token(token: &str, user_mgr: &UserManager) -> bool {
 }
 
 async fn ws_service(
-    (sink, mut srv, token): (ws::WsSink, UnboundedSender<ServerEvent>, Option<String>),
-) -> Result<impl Service<ws::Frame, Response = Option<ws::Message>, Error = io::Error>, web::Error>
+    (sink, mut srv, mut command_worker, token): (
+        ws::WsSink,
+        UnboundedSender<ServerEvent>,
+        UnboundedSender<CmdWorkerMsg>,
+        Option<String>,
+    ),
+) -> Result<impl Service<ws::Frame, Response = Option<ws::Message>, Error = io::Error>, AppError>
 {
     let (tx, mut rx) = mpsc::unbounded();
-
-    srv.send(ServerEvent::Connect(tx, token)).await.unwrap();
+    srv.send(ServerEvent::Connect(tx.clone(), token)).await?;
 
     let id = if let Some(ClientEvent::Id(id)) = rx.next().await {
         id
@@ -68,9 +89,13 @@ async fn ws_service(
         panic!();
     };
 
+    command_worker.send(CmdWorkerMsg::Register(id, tx)).await?;
+
     let state = Rc::new(RefCell::new(WsSession {
         hb: Instant::now(),
         id,
+        server: srv.clone(),
+        command_worker: command_worker.clone(), 
     }));
 
     rt::spawn(messages(sink.clone(), rx));
@@ -91,9 +116,7 @@ async fn ws_service(
             }
             ws::Frame::Text(raw) => {
                 let msg = String::from_utf8(Vec::from(&raw[..])).unwrap();
-                if let Some(packet) = ServerMessage::parse(msg) {
-                    
-                }
+                if let Some(packet) = ServerMessage::parse(msg) {}
 
                 None
             }
@@ -106,6 +129,7 @@ async fn ws_service(
     // handler service for shutdown notification that stop heartbeat task
     let on_shutdown = fn_shutdown(move || {
         let _ = tx.send(());
+        // message_worker.send(CmdWorkerMsg::Remove(id)).await;
     });
 
     // pipe our service with on_shutdown callback
@@ -121,6 +145,9 @@ async fn messages(sink: ws::WsSink, mut server: mpsc::UnboundedReceiver<ClientEv
                 if let Ok(raw) = raw {
                     let _ = sink.send(ws::Message::Text(ByteString::from(raw))).await;
                 }
+            },
+            ClientEvent::RawMessage(raw) => {
+                sink.send(ws::Message::Text(ByteString::from(raw))).await;
             }
         };
     }

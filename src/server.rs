@@ -1,5 +1,5 @@
-use crate::{rooms::Room, event::server_message::ServerEvent};
-use crate::event::client_message::{ClientEvent, ClientMessage, AuthData};
+use crate::event::client_message::{AuthData, ClientEvent, ClientMessage};
+use crate::{event::server_message::ServerEvent, rooms::Room};
 use futures::SinkExt;
 use futures::{
     channel::mpsc::{self, UnboundedSender},
@@ -95,16 +95,14 @@ impl GameServer {
                 rt::spawn(async move {
                     let _ = client.send(ClientEvent::Id(user_id)).await;
 
-                    let auth_packet = ClientMessage::Auth(AuthData{token});
+                    let auth_packet = ClientMessage::Auth(AuthData { token });
                     let _ = client.send(ClientEvent::Message(auth_packet)).await;
                 });
             }
             ServerEvent::Disconnect(client_id) => {
                 println!("User {} disconnected", client_id);
-            },
-            ServerEvent::Message(packet, client_id) => {
-
             }
+            ServerEvent::Message(packet, client_id) => {}
         }
     }
 
