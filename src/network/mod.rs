@@ -11,10 +11,10 @@ use ntex::{channel::oneshot, rt, time};
 use ntex::{fn_service, pipeline};
 use serde::{Deserialize, Serialize};
 
+use crate::command_worker::CmdWorkerMsg;
 use crate::error::AppError;
 use crate::event::client_message::ClientEvent;
 use crate::event::server_message::{ServerEvent, ServerMessage};
-use crate::command_worker::CmdWorkerMsg;
 use crate::server::UserManager;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -31,7 +31,7 @@ struct WsSession {
     hb: Instant,
 
     server: UnboundedSender<ServerEvent>,
-    command_worker: UnboundedSender<CmdWorkerMsg>
+    command_worker: UnboundedSender<CmdWorkerMsg>,
 }
 
 impl Drop for WsSession {
@@ -39,7 +39,6 @@ impl Drop for WsSession {
         let _ = self.command_worker.send(CmdWorkerMsg::Remove(self.id));
     }
 }
-
 
 #[derive(Deserialize)]
 struct WsRequestQuery {
@@ -78,8 +77,7 @@ async fn ws_service(
         UnboundedSender<CmdWorkerMsg>,
         Option<String>,
     ),
-) -> Result<impl Service<ws::Frame, Response = Option<ws::Message>, Error = io::Error>, AppError>
-{
+) -> Result<impl Service<ws::Frame, Response = Option<ws::Message>, Error = io::Error>, AppError> {
     let (tx, mut rx) = mpsc::unbounded();
     srv.send(ServerEvent::Connect(tx.clone(), token)).await?;
 
@@ -95,7 +93,7 @@ async fn ws_service(
         hb: Instant::now(),
         id,
         server: srv.clone(),
-        command_worker: command_worker.clone(), 
+        command_worker: command_worker.clone(),
     }));
 
     rt::spawn(messages(sink.clone(), rx));
@@ -116,7 +114,7 @@ async fn ws_service(
             }
             ws::Frame::Text(raw) => {
                 let msg = String::from_utf8(Vec::from(&raw[..])).unwrap();
-                if let Some(packet) = ServerMessage::parse(msg) {}
+                if let Some(_) = ServerMessage::parse(msg) {}
 
                 None
             }
@@ -145,9 +143,9 @@ async fn messages(sink: ws::WsSink, mut server: mpsc::UnboundedReceiver<ClientEv
                 if let Ok(raw) = raw {
                     let _ = sink.send(ws::Message::Text(ByteString::from(raw))).await;
                 }
-            },
+            }
             ClientEvent::RawMessage(raw) => {
-                sink.send(ws::Message::Text(ByteString::from(raw))).await;
+                let _ = sink.send(ws::Message::Text(ByteString::from(raw))).await;
             }
         };
     }

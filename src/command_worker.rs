@@ -2,16 +2,17 @@ use std::collections::HashMap;
 
 use futures::{
     channel::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    StreamExt, io::ReadToEnd, SinkExt,
+    SinkExt, StreamExt,
 };
-use ntex::{
-    rt, util,
-    util::Either::{Left, Right},
-};
+use ntex::rt;
 use redis::{aio::Connection, AsyncCommands};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::{error::AppError, event::client_message::ClientEvent, util::redis::connect_to_redis};
+use crate::{
+    error::AppError,
+    event::client_message::ClientEvent,
+    util::{redis::{connect_to_redis, connect_to_redis_sync}, stream::{merge_receiver, EventType}},
+};
 
 pub enum CmdWorkerMsg {
     Register(usize, UnboundedSender<ClientEvent>),
@@ -24,15 +25,13 @@ pub struct CommandWorker {
     clients: HashMap<usize, UnboundedSender<ClientEvent>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Debug)]
 pub enum Command {
-    Send(usize, String)
+    Send(usize, String),
 }
 
 impl CommandWorker {
-
-    async fn process(&self, data: &str) -> Result<(), AppError> {
-        let cmd: Command = serde_json::from_str(data)?;
+    async fn process(&self, cmd: Command) -> Result<(), AppError> {
         match cmd {
             Command::Send(user, msg) => {
                 if let Some(mut client) = self.clients.get(&user) {
@@ -44,7 +43,11 @@ impl CommandWorker {
         Ok(())
     }
 
-    async fn register_client(&mut self, id: usize, client: UnboundedSender<ClientEvent>) -> Result<(), AppError> {
+    async fn register_client(
+        &mut self,
+        id: usize,
+        client: UnboundedSender<ClientEvent>,
+    ) -> Result<(), AppError> {
         self.clients.insert(id, client);
         self.con.set(format!("clients:{}", id), &self.id).await?;
 
@@ -58,23 +61,56 @@ impl CommandWorker {
         Ok(())
     }
 
-    async fn start(&mut self, mut rx: UnboundedReceiver<CmdWorkerMsg>) -> Result<(), AppError> {
-        let key = format!("workers:{}", self.id);
+    async fn redis_messages(
+        channel_id: String,
+        mut tx: UnboundedSender<Command>,
+    ) -> Result<(), AppError> {
+        let mut subcon = connect_to_redis_sync().await?;
+        let mut subscriber = subcon.as_pubsub();
+
+        subscriber.subscribe(channel_id)?;
         loop {
-            match util::select(
-                rx.next(),
-                self.con.brpop::<&str, Vec<String>>(key.as_str(), 1000000),
-            )
-            .await
-            {
-                Left(Some(CmdWorkerMsg::Register(id, client))) => self.register_client(id, client).await?,
-                Left(Some(CmdWorkerMsg::Remove(id))) => self.remove_client(id).await?,
-                Left(None) => break,
-                Right(Ok(val)) => self.process(&val[1]).await?,
-                Right(Err(_)) => (),
+            let msg = subscriber.get_message()?;
+            let cmd: Command = match serde_json::from_str(msg.get_payload::<String>()?.as_str()) {
+                Ok(res) => res,
+                Err(err) => {
+                    println!("Error in redis worker: {}", err);
+                    continue;
+                }
+            };
+            match tx.send(cmd).await {
+                Ok(_) => (),
+                Err(_) => {
+                    println!("Exiting redis worker");
+                    break;
+                }
             }
         }
 
+        Ok(())
+    }
+
+    async fn start(&mut self, mut rx: UnboundedReceiver<CmdWorkerMsg>) -> Result<(), AppError> {
+        let channel_id = format!("workers:{}", self.id);
+
+        let (tredis, mut rredis) = mpsc::unbounded();
+        rt::Arbiter::new().exec_fn(move || {
+            rt::spawn(CommandWorker::redis_messages(channel_id, tredis));
+        });
+
+        let mut events = merge_receiver(&mut rx, &mut rredis);
+
+        while let Some(ev) = events.next().await {
+            match ev {
+                EventType::A(CmdWorkerMsg::Register(id, client)) => {
+                    self.register_client(id, client).await?
+                }
+                EventType::A(CmdWorkerMsg::Remove(id)) => self.remove_client(id).await?,
+                EventType::B(cmd) => self.process(cmd).await?,
+            }
+        }
+
+        println!("Exiting command thread");
         Ok(())
     }
 
@@ -89,7 +125,9 @@ impl CommandWorker {
 
         rt::Arbiter::new().exec_fn(move || {
             rt::spawn(async move {
-                let _ = worker.start(rx).await;
+                if let Err(err) = worker.start(rx).await {
+                    println!("Error in cmd worker: {}", err);
+                }
                 rt::Arbiter::current().stop();
             });
         });

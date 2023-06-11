@@ -1,5 +1,8 @@
 use futures::channel::mpsc::SendError;
-use ntex::{web::{self, WebResponseError, HttpRequest, HttpResponse}, http::StatusCode};
+use ntex::{
+    http::StatusCode,
+    web::{self, HttpRequest, HttpResponse, WebResponseError},
+};
 use redis::RedisError;
 use serde::Serialize;
 
